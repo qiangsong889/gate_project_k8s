@@ -1,0 +1,70 @@
+# 第一部分：给数据库 Pod 提供集群内部的访问名称。
+apiVersion: v1 # Service 使用的 Kubernetes API 版本。
+kind: Service # 声明这个资源是 Service。
+metadata:
+  name: kb-postgres # Service 名称；同一命名空间内可用 postgres 访问数据库。
+spec:
+  clusterIP: None # Headless Service：不分配虚拟 IP，DNS 直接返回匹配的 Pod IP。
+  selector:
+    app: kb-postgres # 找到带有 app=postgres 标签的 Pod。
+  ports:
+    - name: kb-postgres # 给这条端口配置取名。
+      port: 5432 # 数据库服务的端口。
+      targetPort: kb-postgres # 对应下方容器里名为 postgres 的端口，即 5432。
+--- # 分隔两个独立资源；一次 kubectl apply 会处理整个文件。
+# 第二部分：运行 PostgreSQL，并为它保留稳定名称和持久化存储。
+apiVersion: apps/v1 # StatefulSet 使用的 API 版本。
+kind: StatefulSet
+metadata:
+  name: kb-postgres # StatefulSet 名称；第一个 Pod 会叫 postgres-0。
+spec:
+  serviceName: kb-postgres # 关联上面的 Headless Service，为 Pod 提供稳定的 DNS 名称。
+  replicas: 1 # 只运行一个数据库 Pod；增加副本不会自动配置数据库主从复制。
+  selector:
+    matchLabels:
+      app: kb-postgres # StatefulSet 根据这个标签识别自己管理的 Pod。
+  template: # Pod 模板：Kubernetes 根据下面的配置创建 Pod。
+    metadata:
+      labels:
+        app: kb-postgres # 必须匹配上面的 matchLabels，同时供 Service 查找。
+    spec:
+      containers:
+        - name: kb-postgres # Pod 中的容器名称。
+          image: pgvector/pgvector:pg16 # PostgreSQL 16 镜像，包含 pgvector 扩展文件。
+          ports:
+            - name: kb-postgres
+              containerPort: 5432 # 声明数据库使用的容器端口，不会直接暴露到公网。
+          envFrom: # 把 Secret 中的键值全部作为环境变量传进容器。
+            - secretRef:
+                # Secret 必须事先存在于同一命名空间；名称要与你实际创建的一致。
+                # 初始化使用 POSTGRES_PASSWORD、POSTGRES_USER、POSTGRES_DB，
+                # 不要与应用连接数据库时使用的 PGHOST、PGPASSWORD 等变量混淆。
+                name: kb-postgres
+          env: # 单独设置数据目录。
+            - name: PGDATA
+              # 用挂载目录下的子目录，避开挂载点可能自带的 lost+found。
+              value: /var/lib/postgresql/data/pgdata
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "postgres"]
+            initialDelaySeconds: 5
+            periodSeconds: 5            
+          resources: # 调度时向节点申请资源；requests 不是使用上限。
+            requests:
+              cpu: 100m # 申请 0.1 个 CPU 核。
+              memory: 256Mi # 申请 256 MiB 内存；本配置未设置 limits。
+          volumeMounts: # 把持久化存储接到容器内的目录。
+            - name: data # 对应下面 volumeClaimTemplates 中的名称。
+              mountPath: /var/lib/postgresql/data # PGDATA 位于此目录内，数据会写入持久卷。
+  volumeClaimTemplates: # 每个 Pod 各自申请 PVC，Pod 重建后继续使用原来的 PVC。
+    - metadata:
+        name: data # 本例生成的 PVC 名称是 data-postgres-0。
+      spec:
+        accessModes:
+          - ReadWriteOnce # 卷允许由一个节点读写挂载，不等于只能被一个 Pod 使用。
+        # 未指定 storageClassName，使用集群的默认 StorageClass。
+        # 集群需具备可用的存储供应方式，否则 PVC 可能一直处于 Pending。
+        resources:
+          requests:
+            storage: 1Gi # 申请 1 GiB 的持久化存储容量。
+# 默认情况下，删除 StatefulSet 不会自动删除它创建的 PVC。

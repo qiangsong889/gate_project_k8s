@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  creationTimestamp: null
+  labels:
+    app: kb-app
+  name: kb-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kb-app
+  template:
+    metadata:
+      labels:
+        app: kb-app
+    spec:
+      containers:
+      - image: shyanetech/kb-assistant:v0.2
+        name: kb-assistant
+        ports:
+          - containerPort: 8000
+        env:
+          - name: PGHOST
+            value: kb-postgres
+          - name: PGPASSWORD              # 容器里的变量名（db.py 读的就是它）
+            valueFrom:
+              secretKeyRef:
+                name: kb-postgres         # Secret 的名字
+                key: POSTGRES_PASSWORD
+        envFrom:
+          - secretRef: 
+              name: kb-anthropic
+        resources:
+          requests:
+            memory: 1Gi
+        readinessProbe:
+          httpGet:
+            path: /api/health
+            port: 8000
+          initialDelaySeconds: 10   # 启动后先等 10 秒再开始探测（加载 torch 和模型需要时间）
+          periodSeconds: 5          # 之后每 5 秒探测一次
+          failureThreshold: 3       # 连续失败 3 次才判定为未就绪
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kb-app                 # Service 自身的名字
+  namespace: default               # 部署的命名空间
+  labels:
+    app: kb-app               # 给 Service 自身打的标签
+spec:
+  type: ClusterIP                  # Service 类型：ClusterIP (默认) / NodePort / LoadBalancer
+  selector:
+    app: kb-app                # 【核心关键】匹配并选择目标的 Pod 标签 (匹配 Pod 的 template.metadata.labels)
+  ports:
+    - name: http                   # 端口映射规则名称
+      protocol: TCP                # 传输协议，默认为 TCP
+      port: 80                     # Service 在集群内暴露的端口 (供集群内其他 Service 访问)
+      targetPort: 8000             # 目标 Pod 容器内部实际监听的端口
+      # nodePort: 30080            # 仅在 type 为 NodePort 或 LoadBalancer 时有效 (范围 30000-32767)

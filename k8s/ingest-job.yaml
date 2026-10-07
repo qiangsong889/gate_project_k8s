@@ -1,0 +1,32 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kb-ingest
+  labels:
+    app:  kb-ingest
+spec:
+  ttlSecondsAfterFinished: 600
+  backoffLimit: 2
+  template:
+    metadata:
+      labels:
+        app:  kb-ingest
+    spec:
+      restartPolicy: Never
+      containers:
+      - name:  kb-ingest
+        image: shyanetech/kb-assistant:v0.2
+        imagePullPolicy: IfNotPresent
+        command: ["python", "ingest.py"]
+        env:
+          - name: PGHOST
+            value: kb-postgres
+          - name: PGPASSWORD              # 容器里的变量名（db.py 读的就是它）
+            valueFrom:
+              secretKeyRef:
+                name: kb-postgres         # Secret 的名字
+                key: POSTGRES_PASSWORD 
+        resources:
+          requests:
+            memory: 1Gi
+        
