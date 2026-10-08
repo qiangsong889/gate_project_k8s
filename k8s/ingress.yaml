@@ -1,0 +1,34 @@
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: kb-ratelimit
+spec:
+  rateLimit:
+    average: 6      # 平均每个 period 允许 6 个请求
+    period: 1m
+    burst: 6        # 允许短时间内一次性用完这 6 个
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: kb-app
+  annotations:
+    # 命名空间-中间件名@kubernetescrd：让 /api 的请求先经过限流
+    traefik.ingress.kubernetes.io/router.middlewares: default-kb-ratelimit@kubernetescrd
+    # 注意：不加 cert-manager 注解，证书由 k8s-notes 那个 Ingress 负责申请和续期
+spec:
+  tls:
+    - hosts:
+        - shaynesong.tech
+      secretName: k8s-notes-tls     # 只引用已有的证书，不管理它
+  rules:
+    - host: shaynesong.tech
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix        # /api、/api/health、/api/chat/stream 都会匹配
+            backend:
+              service:
+                name: kb-app
+                port:
+                  number: 80

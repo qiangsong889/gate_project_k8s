@@ -16,7 +16,7 @@ spec:
         app: kb-app
     spec:
       containers:
-      - image: shyanetech/kb-assistant:v0.2
+      - image: shyanetech/kb-assistant:v0.3
         name: kb-assistant
         ports:
           - containerPort: 8000
@@ -28,6 +28,8 @@ spec:
               secretKeyRef:
                 name: kb-postgres         # Secret 的名字
                 key: POSTGRES_PASSWORD
+          - name: DAILY_BUDGET_USD
+            value: "1"
         envFrom:
           - secretRef: 
               name: kb-anthropic

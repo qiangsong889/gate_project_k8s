@@ -170,8 +170,8 @@ def chat_stream(body: ChatRequest) -> StreamingResponse:
             cost = session.conversation.total_cost - start_cost
             record_daily_cost(cost)
             logger.info(
-                "request session=%s status=%s takes=%s cost=%s tool_used=%s",
-                session_id, status, f"{elapsed:.3f}秒", f"${cost}", ",".join(t for t in tools_used))
+                "request session=%s status=%s takes=%s cost=%s total_cost=%s tool_used=%s",
+                session_id, status, f"{elapsed:.3f}秒", f"${cost}", f"${session.conversation.total_cost}", ",".join(t for t in tools_used))
             session.lock.release()
         
     return StreamingResponse(event_source(), media_type="text/event-stream")  # ③

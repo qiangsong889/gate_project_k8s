@@ -120,160 +120,152 @@ class Conversation:
         current_messages: list[MessageParam] = [
             self._user_message(user_text)
         ]
-        try:
-            for _ in range(10):
-                with self.client.messages.stream(
-                    model=self.model,
-                    max_tokens=self.max_tokens,
-                    system=get_prompt(
-                        "knowledge_search",
-                        self.prompt_version,
-                    ).template,
-                    messages=self._join_messages(current_messages),
-                    tools=tools,
-                    cache_control={"type": "ephemeral"},
-                ) as stream:
-                    for text in stream.text_stream:
-                        yield {
-                            "type": "text",
-                            "delta": text,
-                        }
-
-                    final = stream.get_final_message()
-
-                # 原来的 _record_usage() 会打印，所以这里只更新统计。
-                usage = final.usage
-                self.total_input_tokens += usage.input_tokens
-                self.total_output_tokens += usage.output_tokens
-                if usage.cache_read_input_tokens is not None:
-                    self.total_cache_read_input_tokens += usage.cache_read_input_tokens
-                if usage.cache_creation_input_tokens is not None:
-                    self.total_cache_creation_input_tokens += usage.cache_creation_input_tokens
-
-                try:
-                    cost = self._calcualte_cost(
-                        input_token=usage.input_tokens,
-                        output_token=usage.output_tokens,
-                        cache_read_input_tokens=usage.cache_read_input_tokens,
-                        cache_creation_input_tokens=usage.cache_creation_input_tokens
-                    )
-                except ValueError:
-                    cost = None
-
-                if cost is not None:
-                    self.total_cost += cost
-
-                if final.stop_reason == "end_turn":
-                    current_messages.append(
-                        self._assistant_message(final.content)
-                    )
-
-                    answer = "".join(
-                        block.text
-                        for block in final.content
-                        if block.type == "text"
-                    )
-
-                    # 在发出 done 前保存，确保调用方收到时历史已更新。
-                    self.message_turns.append(current_messages)
-                    return_messages_saved = True
-
+        for _ in range(10):
+            with self.client.messages.stream(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                system=get_prompt(
+                    "knowledge_search",
+                    self.prompt_version,
+                ).template,
+                messages=self._join_messages(current_messages),
+                tools=tools,
+                cache_control={"type": "ephemeral"},
+            ) as stream:
+                for text in stream.text_stream:
                     yield {
-                        "type": "usage",
-                        "input_tokens": usage.input_tokens,
-                        "output_tokens": usage.output_tokens,
-                        "cache_read": usage.cache_read_input_tokens,       # 这次从缓存读了多少
-                        "cache_write": usage.cache_creation_input_tokens,  # 这次写进缓存多少
-                        "cost": cost,
-                        "total_cost": self.total_cost,
+                        "type": "text",
+                        "delta": text,
+                    }
+
+                final = stream.get_final_message()
+
+            # 原来的 _record_usage() 会打印，所以这里只更新统计。
+            usage = final.usage
+            self.total_input_tokens += usage.input_tokens
+            self.total_output_tokens += usage.output_tokens
+            if usage.cache_read_input_tokens is not None:
+                self.total_cache_read_input_tokens += usage.cache_read_input_tokens
+            if usage.cache_creation_input_tokens is not None:
+                self.total_cache_creation_input_tokens += usage.cache_creation_input_tokens
+
+            try:
+                cost = self._calcualte_cost(
+                    input_token=usage.input_tokens,
+                    output_token=usage.output_tokens,
+                    cache_read_input_tokens=usage.cache_read_input_tokens,
+                    cache_creation_input_tokens=usage.cache_creation_input_tokens
+                )
+            except ValueError:
+                cost = None
+
+            if cost is not None:
+                self.total_cost += cost
+
+            if final.stop_reason == "end_turn":
+                current_messages.append(
+                    self._assistant_message(final.content)
+                )
+
+                answer = "".join(
+                    block.text
+                    for block in final.content
+                    if block.type == "text"
+                )
+
+                # 在发出 done 前保存，确保调用方收到时历史已更新。
+                self.message_turns.append(current_messages)
+                return_messages_saved = True
+
+                yield {
+                    "type": "usage",
+                    "input_tokens": usage.input_tokens,
+                    "output_tokens": usage.output_tokens,
+                    "cache_read": usage.cache_read_input_tokens,       # 这次从缓存读了多少
+                    "cache_write": usage.cache_creation_input_tokens,  # 这次写进缓存多少
+                    "cost": cost,
+                    "total_cost": self.total_cost,
+                }
+                
+                yield {
+                    "type": "done",
+                    "answer": answer,
+                }
+                return
+            if final.stop_reason == "max_tokens":
+                raise RuntimeError(
+                    "回复被截断，请提高 max_tokens 后重试"
+                )
+
+            if final.stop_reason != "tool_use":
+                raise RuntimeError(
+                    f"未处理的停止原因：{final.stop_reason}"
+                )
+
+            calls = [
+                block
+                for block in final.content
+                if block.type == "tool_use"
+            ]
+
+            if not calls:
+                raise RuntimeError(
+                    "模型要求调用工具，但没有返回工具调用"
+                )
+
+            results: list[ToolResultBlockParam] = []
+
+            try:
+                for block in calls:
+                    yield {
+                        "type": "tool",
+                        "tool_use_id": block.id,
+                        "name": block.name,
+                        "input": block.input,
+                    }
+
+                    result: ToolResultBlockParam = {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                    }
+
+                    func = TOOL_FUNCS.get(block.name)
+
+                    try:
+                        if func is None:
+                            raise ValueError(
+                                f"未知工具：{block.name}"
+                            )
+
+                        result["content"] = func(**block.input)
+
+                    except Exception as exc:
+                        result["content"] = f"检索服务暂时不可用"
+                        result["is_error"] = True
+                        logger.exception("数据库操作失败: %s", exc)
+                        # raise RuntimeError("工具执行失败")
+                    results.append(result)
+                    yield {
+                        "type": "tool_done",
+                        "tool_use_id": block.id,
+                        "name": block.name,
+                        "is_error": bool(result.get("is_error", False)),
                     }
                     
-                    yield {
-                        "type": "done",
-                        "answer": answer,
-                    }
-                    return
-                if final.stop_reason == "max_tokens":
-                    raise RuntimeError(
-                        "回复被截断，请提高 max_tokens 后重试"
-                    )
+            finally:
+                current_messages.extend([
+                    self._assistant_message(final.content),
+                    self._user_message(results),
+                ])
 
-                if final.stop_reason != "tool_use":
-                    raise RuntimeError(
-                        f"未处理的停止原因：{final.stop_reason}"
-                    )
-
-                calls = [
-                    block
-                    for block in final.content
-                    if block.type == "tool_use"
-                ]
-
-                if not calls:
-                    raise RuntimeError(
-                        "模型要求调用工具，但没有返回工具调用"
-                    )
-
-                results: list[ToolResultBlockParam] = []
-
-                try:
-                    for block in calls:
-                        yield {
-                            "type": "tool",
-                            "tool_use_id": block.id,
-                            "name": block.name,
-                            "input": block.input,
-                        }
-
-                        result: ToolResultBlockParam = {
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                        }
-
-                        func = TOOL_FUNCS.get(block.name)
-
-                        try:
-                            if func is None:
-                                raise ValueError(
-                                    f"未知工具：{block.name}"
-                                )
-
-                            result["content"] = func(**block.input)
-
-                        except Exception as exc:
-                            result["content"] = f"检索服务暂时不可用"
-                            result["is_error"] = True
-                            logger.exception("数据库操作失败: %s", exc)
-                            # raise RuntimeError("工具执行失败")
-                        results.append(result)
-                        yield {
-                            "type": "tool_done",
-                            "tool_use_id": block.id,
-                            "name": block.name,
-                            "is_error": bool(result.get("is_error", False)),
-                        }
-                        
-                finally:
-                    current_messages.extend([
-                        self._assistant_message(final.content),
-                        self._user_message(results),
-                    ])
-
-            raise RuntimeError(
-                "达到最大调用次数，仍未生成最终回答"
-            )
-        finally:
-            print()
+        raise RuntimeError(
+            "达到最大调用次数，仍未生成最终回答"
+        )
 
             
     def send(self, user_text: str) -> str:
         for event in self.send_stream(user_text=user_text):
-            if event["type"] == "text":
-                print(event["delta"], end="", flush=True)
-            elif event["type"] == "tool":
-                print(f"调用工具: {event['name']}")
-            elif event["type"] == "done":
-                print()
+            if event["type"] == "done":
                 return event["answer"]
         raise RuntimeError("没有收到完整回答")
 
@@ -379,7 +371,13 @@ if __name__ == "__main__":
                         conversation._set_max_token(int(match.group(1)))
                         continue
                 print("助手：", end="", flush=True)
-                conversation.send(user_text)
+                # conversation.send(user_text)
+                for event in conversation.send_stream(user_text):
+                    if event["type"] == "text":
+                        print(event["delta"], end="", flush=True)
+                    elif event["type"] == "tool":
+                        print(f"\n[调用工具: {event['name']}]")
+                print()
             except anthropic.APIConnectionError as e:
                 print(f"\n请求失败 {e}")
             except anthropic.APIError as e:
